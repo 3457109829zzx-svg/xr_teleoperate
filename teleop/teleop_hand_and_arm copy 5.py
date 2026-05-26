@@ -24,7 +24,7 @@
 #   ├─────────────────────────┼────────────────────────────────────────────────┤
 #   │ 删除了原来的            │ 已移到外层循环顶部，避免重复                          │
 #   │ IK_OFFSET_CALIBRATED 行 │         
-# 5.25记录。优化代码：1)无法设定最大采集组数 2)没有方便的按钮删除失败 3)头显中看不到录制状态
+# 5.25记录。优化代码：1)无法设定最大采集组数 2)没有方便的按钮删除失败 
 
 import time
 import argparse
@@ -32,7 +32,6 @@ from multiprocessing import Value, Array, Lock
 import threading
 import logging_mp
 import numpy as np
-import cv2
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
 
@@ -89,21 +88,6 @@ _last_A_btn = False
 IK_OFFSET_CALIBRATED = False  # 是否已记录初始偏移，全局标记
 ik_offset = np.zeros(14)      # 偏移量数组，存放14个关节的偏移量（左右臂各7）
 
-#【5.25新增】绘制状态覆盖层：在头显图像上叠加当前状态信息（是否正在录制，当前 episode ID），方便用户在 XR 设备中查看当前状态，提升用户体验。
-# 为什么用 img.copy()：副本隔离，head_img.bgr原图干净地进录制数据，带文字的副本只进头显。
-def draw_status_overlay(img, is_recording, episode_id, max_episodes=0):
-    img = img.copy()
-    if is_recording:
-        cv2.circle(img, (25, 30), 10, (0, 0, 255), -1)      # 红色实心圆点
-        cv2.putText(img, f"REC  EP:{episode_id}", (45, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-    else:
-        cv2.putText(img, f"IDLE  EP:{episode_id}", (45, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
-    if max_episodes > 0:
-        cv2.putText(img, f"DONE {episode_id}/{max_episodes}", (45, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-    return img
 
 
 def on_press(key):
@@ -319,10 +303,7 @@ if __name__ == '__main__':
                 time.sleep(0.033)
                 if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                     head_img = img_client.get_head_frame()
-                    # tv_wrapper.render_to_xr(head_img.bgr)
-                    # [5.25新增] 在等待循环里也显示状态覆盖层，方便用户在 XR 设备中查看当前状态（正在等待还是正在录制），提升用户体验。
-                    overlay = draw_status_overlay(head_img.bgr, False, recorder.episode_id if args.record else 0, args.max_episodes)
-                    tv_wrapper.render_to_xr(overlay)
+                    tv_wrapper.render_to_xr(head_img.bgr)
 
                 #【5.18新增】PICO Y键(左手B): 按一下进入遥操作
                 # 为什么放等待循环里： 程序启动后先在这个循环里等，此时 START=False，Y 键按下就设 START=True 进入主循环。逻辑和键盘按 r 一样，只是数据来源从 on_press 换成了 tele_data.left_ctrl_bButton。
@@ -354,10 +335,7 @@ if __name__ == '__main__':
                     if args.record or xr_need_local_img:
                         head_img = img_client.get_head_frame()
                     if xr_need_local_img:
-                        # tv_wrapper.render_to_xr(head_img.bgr)
-                        # [5.25新增] 在主循环里显示状态覆盖层，方便用户在 XR 设备中查看当前状态（正在等待还是正在录制），提升用户体验。
-                        overlay = draw_status_overlay(head_img.bgr, RECORD_RUNNING,recorder.episode_id if args.record else 0, args.max_episodes)
-                        tv_wrapper.render_to_xr(overlay)
+                        tv_wrapper.render_to_xr(head_img.bgr)
                 if camera_config['left_wrist_camera']['enable_zmq']:
                     if args.record:
                         left_wrist_img = img_client.get_left_wrist_frame()

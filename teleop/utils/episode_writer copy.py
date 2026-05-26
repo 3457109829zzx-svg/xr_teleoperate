@@ -1,4 +1,3 @@
-# 5.25新增：加 delete_current_episode 方法
 import os
 import cv2
 import json
@@ -40,13 +39,12 @@ class EpisodeWriter():
             logger_mp.info("==> RerunLogger initializing ok.\n")
         
         self.item_id = -1
-        self.episode_id = 0
+        self.episode_id = -1
         if os.path.exists(self.task_dir):
             episode_dirs = [episode_dir for episode_dir in os.listdir(self.task_dir) if 'episode_' in episode_dir and not episode_dir.endswith('.zip')]
-            if len(episode_dirs) > 0:
-                episode_last = sorted(episode_dirs)[-1]
-                self.episode_id = int(episode_last.split('_')[-1]) + 1
-            logger_mp.info(f"==> task_dir directory already exist, next episode_id is:{self.episode_id}\n")
+            episode_last = sorted(episode_dirs)[-1] if len(episode_dirs) > 0 else None
+            self.episode_id = 0 if episode_last is None else int(episode_last.split('_')[-1])
+            logger_mp.info(f"==> task_dir directory already exist, now self.episode_id is:{self.episode_id}\n")
         else:
             os.makedirs(self.task_dir)
             logger_mp.info(f"==> episode directory does not exist, now create one.\n")
@@ -103,6 +101,8 @@ class EpisodeWriter():
 
         # Reset episode-related data and create necessary directories
         self.item_id = -1
+        self.episode_id = self.episode_id + 1
+        
         self.episode_dir = os.path.join(self.task_dir, f"episode_{str(self.episode_id).zfill(4)}")
         self.color_dir = os.path.join(self.episode_dir, 'colors')
         self.depth_dir = os.path.join(self.episode_dir, 'depths')
@@ -218,18 +218,7 @@ class EpisodeWriter():
 
         self.need_save = False     # Reset the save flag
         self.is_available = True   # Mark the class as available after saving
-        self.episode_id += 1       # Advance to next episode ID after successful save
         logger_mp.info(f"==> Episode saved successfully to {self.json_path}.")
-
-    #【5.25新增】删除当前episode（如果存在）。注意：只能删除刚录制的episode，即最后一个episode，且只能在非录制状态下触发删除，避免误操作导致的录制混乱或误删正在录制的数据。
-    def delete_current_episode(self):
-        import shutil
-        if os.path.exists(self.episode_dir):
-            shutil.rmtree(self.episode_dir)
-            self.episode_id -= 1
-            logger_mp.info(f"Episode {self.episode_dir} deleted.")
-        else:
-            logger_mp.warning(f"No episode to delete at {self.episode_dir}")
 
     def close(self):
         """

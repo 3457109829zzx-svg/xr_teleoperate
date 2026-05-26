@@ -24,7 +24,6 @@
 #   ├─────────────────────────┼────────────────────────────────────────────────┤
 #   │ 删除了原来的            │ 已移到外层循环顶部，避免重复                          │
 #   │ IK_OFFSET_CALIBRATED 行 │         
-# 5.25记录。优化代码：1)无法设定最大采集组数 2)没有方便的按钮删除失败 3)头显中看不到录制状态
 
 import time
 import argparse
@@ -32,7 +31,6 @@ from multiprocessing import Value, Array, Lock
 import threading
 import logging_mp
 import numpy as np
-import cv2
 logging_mp.basicConfig(level=logging_mp.INFO)
 logger_mp = logging_mp.getLogger(__name__)
 
@@ -83,27 +81,9 @@ _last_Y_btn = False
 _last_B_btn = False
 # 【5.24新增】X键消抖（上升沿检测）
 _last_X_btn = False
-# 【5.25新增】A键消抖（上升沿检测）
-_last_A_btn = False
 # 【5.23新增】
 IK_OFFSET_CALIBRATED = False  # 是否已记录初始偏移，全局标记
 ik_offset = np.zeros(14)      # 偏移量数组，存放14个关节的偏移量（左右臂各7）
-
-#【5.25新增】绘制状态覆盖层：在头显图像上叠加当前状态信息（是否正在录制，当前 episode ID），方便用户在 XR 设备中查看当前状态，提升用户体验。
-# 为什么用 img.copy()：副本隔离，head_img.bgr原图干净地进录制数据，带文字的副本只进头显。
-def draw_status_overlay(img, is_recording, episode_id, max_episodes=0):
-    img = img.copy()
-    if is_recording:
-        cv2.circle(img, (25, 30), 10, (0, 0, 255), -1)      # 红色实心圆点
-        cv2.putText(img, f"REC  EP:{episode_id}", (45, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 0, 255), 2)
-    else:
-        cv2.putText(img, f"IDLE  EP:{episode_id}", (45, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
-    if max_episodes > 0:
-        cv2.putText(img, f"DONE {episode_id}/{max_episodes}", (45, 75),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (200, 200, 200), 2)
-    return img
 
 
 def on_press(key):
@@ -151,7 +131,7 @@ if __name__ == '__main__':
     parser.add_argument('--task-goal', type = str, default = 'pick up cube.', help = 'task goal for recording at json file')
     parser.add_argument('--task-desc', type = str, default = 'task description', help = 'task description for recording at json file')
     parser.add_argument('--task-steps', type = str, default = 'step1: do this; step2: do that;', help = 'task steps for recording at json file')
-    parser.add_argument('--max-episodes', type=int, default=-1, help='max number of episodes to record, -1 means unlimited') # [5.25新增]：限制录制的最大 episode 数，防止误操作导致数据爆炸。默认 -1 表示不限制，想限制的话改成具体数字比如 10。
+
     args = parser.parse_args()
     logger_mp.info(f"args: {args}")
 
@@ -319,10 +299,7 @@ if __name__ == '__main__':
                 time.sleep(0.033)
                 if camera_config['head_camera']['enable_zmq'] and xr_need_local_img:
                     head_img = img_client.get_head_frame()
-                    # tv_wrapper.render_to_xr(head_img.bgr)
-                    # [5.25新增] 在等待循环里也显示状态覆盖层，方便用户在 XR 设备中查看当前状态（正在等待还是正在录制），提升用户体验。
-                    overlay = draw_status_overlay(head_img.bgr, False, recorder.episode_id if args.record else 0, args.max_episodes)
-                    tv_wrapper.render_to_xr(overlay)
+                    tv_wrapper.render_to_xr(head_img.bgr)
 
                 #【5.18新增】PICO Y键(左手B): 按一下进入遥操作
                 # 为什么放等待循环里： 程序启动后先在这个循环里等，此时 START=False，Y 键按下就设 START=True 进入主循环。逻辑和键盘按 r 一样，只是数据来源从 on_press 换成了 tele_data.left_ctrl_bButton。
@@ -354,10 +331,7 @@ if __name__ == '__main__':
                     if args.record or xr_need_local_img:
                         head_img = img_client.get_head_frame()
                     if xr_need_local_img:
-                        # tv_wrapper.render_to_xr(head_img.bgr)
-                        # [5.25新增] 在主循环里显示状态覆盖层，方便用户在 XR 设备中查看当前状态（正在等待还是正在录制），提升用户体验。
-                        overlay = draw_status_overlay(head_img.bgr, RECORD_RUNNING,recorder.episode_id if args.record else 0, args.max_episodes)
-                        tv_wrapper.render_to_xr(overlay)
+                        tv_wrapper.render_to_xr(head_img.bgr)
                 if camera_config['left_wrist_camera']['enable_zmq']:
                     if args.record:
                         left_wrist_img = img_client.get_left_wrist_frame()
@@ -369,15 +343,10 @@ if __name__ == '__main__':
                 if args.record and RECORD_TOGGLE:
                     RECORD_TOGGLE = False
                     if not RECORD_RUNNING:
-                        # [5.25新增] 达到最大 episode 数限制后不再创建新 episode，也不再进入 RECORD_RUNNING 状态，直到用户重启程序。这样可以防止误操作导致数据爆炸，同时保留已录制的数据。
-                        if args.max_episodes > 0 and recorder.episode_id >= args.max_episodes:
-                            logger_mp.info(f"Reached max episodes limit ({args.max_episodes}), stoprecording.")
-                            # 不再创建新 episode，也可以直接 break 或只打印提示
+                        if recorder.create_episode():
+                            RECORD_RUNNING = True
                         else:
-                            if recorder.create_episode():
-                                RECORD_RUNNING = True
-                            else:
-                                logger_mp.error("Failed to create episode. Recording not started.")
+                            logger_mp.error("Failed to create episode. Recording not started.")
                     else:
                         RECORD_RUNNING = False
                         recorder.save_episode()
@@ -416,12 +385,6 @@ if __name__ == '__main__':
                 if B_btn and not _last_B_btn and START: #上升沿检测，并且只能在遥操作状态下切换录制状态，避免误操作导致的录制混乱
                     RECORD_TOGGLE = True #完全照搬现有状态机。Line 276-287 的代码会处理剩下的：第一次触发→开始录制，第二次触发→保存并停止录制，第三次→又开始录制……和键盘按 s 一模一样
                 _last_B_btn = B_btn
-
-                # ---- 【5.25新增】PICO A键(右手A): 删除上一个已保存的episode ----
-                A_btn = tele_data.right_ctrl_aButton
-                if A_btn and not _last_A_btn and START and not RECORD_RUNNING:#上升沿检测，并且只能在遥操作状态下、非录制状态下触发删除，避免误操作导致的录制混乱或误删正在录制的数据
-                    recorder.delete_current_episode()
-                _last_A_btn = A_btn
 
                 # ---- 【5.24修改】PICO Y键(左手B): 暂停/恢复遥操作 ----
                 Y_btn = tele_data.left_ctrl_bButton
@@ -698,4 +661,3 @@ if __name__ == '__main__':
             logger_mp.error(f"Failed to close recorder: {e}")
         logger_mp.info("✅ Finally, exiting program.")
         exit(0)
-

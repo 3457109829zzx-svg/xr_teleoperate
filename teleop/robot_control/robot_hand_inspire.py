@@ -1,3 +1,4 @@
+# 5.19记录。 相较于 robot_hand_inspire copy.py，主要增加了以下功能：使用PICO手柄扳机控制灵巧手开合
 from unitree_sdk2py.core.channel import ChannelPublisher, ChannelSubscriber, ChannelFactoryInitialize # dds
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import MotorCmds_, MotorStates_                           # idl
 from unitree_sdk2py.idl.default import unitree_go_msg_dds__MotorCmd_
@@ -15,9 +16,12 @@ Inspire_Num_Motors = 6
 kTopicInspireDFXCommand = "rt/inspire/cmd"
 kTopicInspireDFXState = "rt/inspire/state"
 
+# [5.19新增]”direct_cmd_array = None“ 参数
+# direct_cmd_array 是主进程（teleop_hand_and_arm.py）和手控子进程（control_process）之间的通信通道。它和 left_hand_array、right_hand_array 是同一类东西——都是 multiprocessing.Array，跨进程共享内存。
+# 参数加了默认值 None，所以旧的调用方式（不传这个参数）仍然能正常工作，不会破坏兼容性。
 class Inspire_Controller_DFX:
     def __init__(self, left_hand_array, right_hand_array, dual_hand_data_lock = None, dual_hand_state_array = None,
-                       dual_hand_action_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
+                       dual_hand_action_array = None, direct_cmd_array = None, fps = 100.0, Unit_Test = False, simulation_mode = False):
         logger_mp.info("Initialize Inspire_Controller_DFX...")
         self.fps = fps
         self.Unit_Test = Unit_Test
@@ -51,8 +55,12 @@ class Inspire_Controller_DFX:
             logger_mp.warning("[Inspire_Controller_DFX] Waiting to subscribe dds...")
         logger_mp.info("[Inspire_Controller_DFX] Subscribe dds ok.")
 
+        # [5.19新增] “direct_cmd_array”参数
+        # Process(target=self.control_process, args=(...)) 创建了一个新的操作系统进程。args 元组里的每个元素会被传给 control_process 作为函数参数。
+        # 这和普通函数调用不同——普通函数调用传的是引用（同一进程），而这里是把 multiprocessing.Array 对象从主进程传给子进程。Python 的 multiprocessing模块会用系统级的共享内存机制（mmap）来保证两个进程读写同一块物理内存。
+        # direct_cmd_array 作为 __init__ 的参数，当前在 self 作用域里。但 control_process 运行在另一个进程里，不能访问 self。所以必须显式通过 args 传过去。
         hand_control_process = Process(target=self.control_process, args=(left_hand_array, right_hand_array,  self.left_hand_state_array, self.right_hand_state_array,
-                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array))
+                                                                          dual_hand_data_lock, dual_hand_state_array, dual_hand_action_array,direct_cmd_array))
         hand_control_process.daemon = True
         hand_control_process.start()
 
@@ -80,25 +88,50 @@ class Inspire_Controller_DFX:
         self.HandCmb_publisher.Write(self.hand_msg)
         # logger_mp.debug("hand ctrl publish ok.")
     
+    # [5.19新增] “direct_cmd_array = None”参数
+    # 在init里调用的control_process的args里多传了“direct_cmd_array“参数，对应函数签名这里也应该新增，且顺序必须一致。
     def control_process(self, left_hand_array, right_hand_array, left_hand_state_array, right_hand_state_array,
-                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None):
+                              dual_hand_data_lock = None, dual_hand_state_array = None, dual_hand_action_array = None, direct_cmd_array = None):
         self.running = True
 
-        left_q_target  = np.full(Inspire_Num_Motors, 1.0)
-        right_q_target = np.full(Inspire_Num_Motors, 1.0)
+        left_q_target  = np.full(Inspire_Num_Motors, 1000.0)
+        right_q_target = np.full(Inspire_Num_Motors, 1000.0)
 
         # initialize inspire hand's cmd msg
         self.hand_msg  = MotorCmds_()
         self.hand_msg.cmds = [unitree_go_msg_dds__MotorCmd_() for _ in range(len(Inspire_Right_Hand_JointIndex) + len(Inspire_Left_Hand_JointIndex))]
 
         for idx, id in enumerate(Inspire_Left_Hand_JointIndex):
-            self.hand_msg.cmds[id].q = 1.0
+            self.hand_msg.cmds[id].q = 1000.0
         for idx, id in enumerate(Inspire_Right_Hand_JointIndex):
-            self.hand_msg.cmds[id].q = 1.0
+            self.hand_msg.cmds[id].q = 1000.0
 
         try:
             while self.running:
                 start_time = time.time()
+
+                # [5.19新增] 优先检查是否有手柄扳机直接命令（不走手势重定向）
+                if direct_cmd_array is not None: #- 兼容性检查。如果旧代码没传这个参数（比如 IPC 模式），它就是 None，直接跳过整个分支走原来的手势重定向，不会出错。
+                    with direct_cmd_array.get_lock(): #和主进程约定好的数据集约：direct_cmd_array 是一个 multiprocessing.Array('d', 12)，12 个 double：[0:6] 是左手 6 个手指目标角度，[6:12] 是右手。
+                        direct_cmd = np.array(direct_cmd_array[:]).copy() #自己加锁读一次然后 .copy()，确保拿到一致的数据快照，后续计算不依赖锁。
+                    if np.any(direct_cmd >= 0): #这是判断"是否有扳机命令"的关键。主进程不用扳机时，数组全部是 -1.0。np.any(direct_cmd >= 0) 对全 -1 的数组返回 False，走手势重定向；扳机一旦按下，至少有一个值 >= 0，返回 True，走直接命令。
+                        left_q_target = direct_cmd[:6] #直接拿扳机值赋给目标变量，跳过整个手势重定向的计算。
+                        right_q_target = direct_cmd[6:]
+                        # 写状态和动作到共享数组，供录制使用
+                        # 这段和原代码（下面的）做的事一样：把状态和动作写进共享数组，供 teleop_hand_and_arm.py 的主进程在录制时读取。因为 continue 跳过了原有的这段写入代码，所以这里必须补上。
+                        state_data = np.concatenate((np.array(left_hand_state_array[:]), np.array(right_hand_state_array[:])))
+                        action_data = np.concatenate((left_q_target, right_q_target))
+                        if dual_hand_state_array and dual_hand_action_array:
+                            with dual_hand_data_lock:
+                                dual_hand_state_array[:] = state_data
+                                dual_hand_action_array[:] = action_data
+                        self.ctrl_dual_hand(left_q_target, right_q_target) # 和原有代码一样，把目标角度通过 DDS 下发给机器人硬件。
+                        current_time = time.time()
+                        time_elapsed = current_time - start_time
+                        sleep_time = max(0, (1 / self.fps) - time_elapsed) # 维持 100Hz 的控制频率。因为 continue 跳过了原有的 sleep 代码（line 147-150），这里必须补上。
+                        time.sleep(sleep_time) 
+                        continue #跳回 while 开头，不执行 后面的手势重定向+normalize 逻辑。
+
                 # get dual hand state
                 with left_hand_array.get_lock():
                     left_hand_data  = np.array(left_hand_array[:]).reshape(25, 3).copy()
@@ -121,9 +154,9 @@ class Inspire_Controller_DFX:
                     #     - idx 0~3: 0~1.7 (1.7 = closed)
                     #     - idx 4:   0~0.5
                     #     - idx 5:  -0.1~1.3
-                    # We normalize them using (max - value) / range
+                    # We normalize them using (max - value) / range, scaled to [0, 1000] for inspire_g1_new driver
                     def normalize(val, min_val, max_val):
-                        return np.clip((max_val - val) / (max_val - min_val), 0.0, 1.0)
+                        return np.clip((max_val - val) / (max_val - min_val) * 1000.0, 0.0, 1000.0)
 
                     for idx in range(Inspire_Num_Motors):
                         if idx <= 3:
